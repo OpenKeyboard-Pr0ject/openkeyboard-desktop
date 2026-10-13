@@ -1,0 +1,34 @@
+{
+  "name": "openkeyboard-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenKeyboard as a desktop app: the OpenKeyboard web app with native HID access through Tauri.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "tauri": "tauri",
+    "test": "vitest run",
+    "check": "tsc --noEmit && vitest run && vite build"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@tauri-apps/cli": "^2.12.2",
+    "@types/node": "^20.19.43",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/w3c-web-hid": "^1.0.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.4",
+    "vitest": "^2.1.9"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.12.3",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "xz-decompress": "0.2.3"
+  }
+}
