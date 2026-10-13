@@ -1,0 +1,3 @@
+[submodule "package/openkeyboard"]
+	path = package/openkeyboard
+	url = https://github.com/OpenKeyboard-Pr0ject/openkeyboard.git
