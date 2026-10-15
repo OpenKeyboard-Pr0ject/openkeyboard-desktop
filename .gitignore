@@ -3,3 +3,5 @@ dist
 *.log
 src-tauri/target
 src-tauri/gen
+probe/target
+openkeyboard-device-report.json

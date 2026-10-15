@@ -37,6 +37,10 @@ Tauri window
 - **Reports:** output and feature reports go through Tauri commands. Each open device has a reader thread that forwards input reports as `hid-input-report` events.
 - **Plugging and unplugging:** Rust checks the device list every 2 seconds and sends `hid-devices-changed`; `NativeHid` turns that into `connect` and `disconnect` events.
 
+## Device reports
+
+[`probe/`](probe) holds `openkeyboard-probe`, a separate command-line tool for people whose keyboard is not supported yet. It writes a JSON report with every HID collection, its report descriptor, the Windows driver chain and the installed vendor software. It sends no commands to any device. See [probe/README.md](probe/README.md).
+
 ## Development
 
 ```
