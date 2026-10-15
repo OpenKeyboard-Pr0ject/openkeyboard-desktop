@@ -2,7 +2,7 @@
 
 A small command-line tool that writes a report about the keyboards on a computer. People who own a keyboard that OpenKeyboard does not support yet can run it and send the report, so support can start without the keyboard on the developer's desk.
 
-It only lists devices and reads what the operating system already knows about them. **It sends no commands to any device.**
+By default it only lists devices and reads what the operating system already knows about them. **It sends no commands to any device** unless `--read-versions` is given.
 
 ## Running
 
@@ -10,11 +10,29 @@ Double-click `openkeyboard-probe.exe`, or run it from a terminal:
 
 ```
 openkeyboard-probe                          # devices with a keyboard collection
+openkeyboard-probe --read-versions          # also ask known protocol families for their versions
 openkeyboard-probe --vendor-id 1532         # only one vendor, even without a keyboard collection
 openkeyboard-probe --vendor-id 1532 --product-id 0258
 openkeyboard-probe --all                    # every HID device
 openkeyboard-probe --output razer.json
 ```
+
+## Read-only queries
+
+`--read-versions` asks interfaces of a known protocol family for their versions. The commands come from a fixed list: each family has an enum of allowed queries, and there is no way to send other bytes.
+
+| Family | Interface it is sent to | Queries |
+|---|---|---|
+| VIA | Usage `0xFF60:0x61` with a 32-byte output report, any vendor | Protocol version `01`, firmware version `02 04` |
+| Vial | Same interface, after VIA answered | Keyboard id `FE 00` |
+| Wooting | Vendor `0x31E3`, usage page `0xFF55` with feature report 1 | `GET_VERSION` `D1 DA 01` |
+| Razer | Vendor `0x1532`, a 90-byte feature report without report id | Firmware `00:81`, with transaction ids `1F`, `3F`, `9F`, `FF` in turn until one is answered |
+
+- **Already used elsewhere:** every query is one that OpenKeyboard, Wootility or OpenRazer already sends.
+- **Interfaces are recognized by their reports:** a family is chosen from the parsed descriptor, so a lookalike collection without the expected report is left alone.
+- **One answer per device:** once one interface of a family answers, the other interfaces of the same device are skipped.
+- **Replies for other apps are ignored:** Wooting and VIA replies are matched by command, so traffic from a vendor tool that is open at the same time is skipped.
+- **No serial numbers:** the commands that read serial numbers (Wooting `0x03`, Razer `00:82`) are not on the list.
 
 It prints a summary and writes `openkeyboard-device-report.json` to the current folder. When it is started by double-clicking, it waits for Enter before the window closes.
 
@@ -25,6 +43,9 @@ It prints a summary and writes `openkeyboard-device-report.json` to the current 
 | `devices[]` ids, release number, bus, product strings | hidapi enumeration | Identifies the model and firmware revision (`releaseNumber` is the USB `bcdDevice`) |
 | `interfaces[].usagePage`, `usage`, `interfaceNumber` | hidapi | Shows which protocol family the keyboard speaks: `0xFF60:0x61` is VIA, `0xFF55` is Wooting, a 90-byte feature report on `0x0C:0x01` is Razer |
 | `interfaces[].reportDescriptor` | hidapi, rebuilt from the Windows preparsed data | Every report ID and size, including the keyboard and consumer collections that WebHID hides |
+| `interfaces[].declaredReports` | Parsed from the descriptor | Kind, report ID and byte length of each report, with constant fields counted as WebHID's parser in the desktop app does |
+| `interfaces[].queries` | `--read-versions` only | Name, request, reply and decoded result or error of each read-only query. Trailing zero bytes are left out of `request` and `reply` |
+| `readOnlyQueriesSent` | Command line | Whether any query was allowed to run |
 | `interfaces[].windowsDevices[]` | CfgMgr32, from the HID collection up to the USB device | Driver, filter drivers (for example a vendor's own filter that keeps Chrome away), hardware IDs and the name each USB interface reports |
 | `vendorSoftware[]` | Uninstall entries in the registry, matched against known peripheral brands | Which vendor tool to capture traffic from, and its version |
 | `environment` | `std::env::consts`, registry | OS, architecture and Windows build |
@@ -60,7 +81,11 @@ Device lookups through CfgMgr32 and the registry run on Windows only. On Linux a
 
 On 2026-10-16, on Windows 11 25H2 (build 26200), it reported the Wooting 80HE TenZ (`31e3:1402`, release `0x0250`) with all six collections and their descriptors. These include `0xFF55` with report IDs 1 to 6 and a 7-byte feature report, as described in OpenKeyboard's `docs/wooting.md`. It also listed Wootility 5.4.2 among the installed software.
 
-## Next levels
+With `--read-versions`, on the same day:
 
-1. **Safe probes:** send only read commands from an allowlist, and only to interfaces that match a known protocol family.
-2. **Traffic capture:** record vendor-tool traffic (USBPcap on Windows) into the same report format.
+- **Wooting 80HE TenZ:** answered `d1da01880300020e01`, firmware 2.14.1.
+- **Razer Viper V4 Pro (`1532:00e6`):** a mouse, included because it has a keyboard collection. The control report is on MI_03 (`0x0C:0x01`). It answered transaction id `1F` with firmware 1.2 on the first try. The `0x0C:0x01` collection on MI_01 has no 90-byte report and was left alone.
+
+## Next level
+
+**Traffic capture:** record vendor-tool traffic (USBPcap on Windows) into the same report format.

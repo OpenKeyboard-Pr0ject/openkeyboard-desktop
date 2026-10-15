@@ -34,6 +34,10 @@ impl DeviceSelection {
     }
 }
 
+pub fn select_devices(devices: Vec<PhysicalDevice>, selection: DeviceSelection) -> Vec<PhysicalDevice> {
+    devices.into_iter().filter(|device| selection.selects(device)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,6 +78,16 @@ mod tests {
 
         assert!(selection.selects(&device(0x1532, 0x0258, 0x0c, 0x01)));
         assert!(!selection.selects(&device(0x1532, 0x0271, 0x0c, 0x01)));
+    }
+
+    #[test]
+    fn keeps_only_selected_devices() {
+        let devices = vec![device(0x31e3, 0x1402, 0x01, 0x06), device(0x046d, 0xc52b, 0x01, 0x02)];
+
+        let selected = select_devices(devices, DeviceSelection::default());
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].identity().vendor_id, 0x31e3);
     }
 
     #[test]

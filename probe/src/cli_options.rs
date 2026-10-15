@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::device_report::ReportRequest;
 use crate::device_selection::DeviceSelection;
 
 pub const DEFAULT_OUTPUT_FILE: &str = "openkeyboard-device-report.json";
@@ -8,9 +9,11 @@ pub const USAGE: &str = "\
 Usage: openkeyboard-probe [options]
 
 Writes a report about your keyboards that helps OpenKeyboard support them.
-It only lists devices and reads their descriptors. It sends no commands to any device.
+By default it only lists devices and reads their descriptors. It sends no commands to any device.
 
 Options:
+  --read-versions         Also ask VIA, Vial, Wooting and Razer devices for their protocol and firmware
+                          versions. Only read commands from a fixed list are sent, and nothing is changed.
   --all                   Include every HID device, not only devices with a keyboard collection
   --vendor-id <hex>       Include only devices with this vendor id, for example 1532
   --product-id <hex>      Include only devices with this product id, for example 0258
@@ -25,25 +28,27 @@ pub enum Command {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectOptions {
-    pub selection: DeviceSelection,
+    pub request: ReportRequest,
     pub output_path: PathBuf,
 }
 
 pub fn parse_arguments(arguments: &[String]) -> Result<Command, String> {
     let mut selection = DeviceSelection::default();
+    let mut read_versions = false;
     let mut output_path = PathBuf::from(DEFAULT_OUTPUT_FILE);
     let mut remaining = arguments.iter();
     while let Some(argument) = remaining.next() {
         match argument.as_str() {
             "--help" | "-h" => return Ok(Command::ShowHelp),
             "--all" => selection.every_device = true,
+            "--read-versions" => read_versions = true,
             "--vendor-id" => selection.vendor_id = Some(parse_hex_id(value_after(argument, remaining.next())?)?),
             "--product-id" => selection.product_id = Some(parse_hex_id(value_after(argument, remaining.next())?)?),
             "--output" => output_path = PathBuf::from(value_after(argument, remaining.next())?),
             unknown => return Err(format!("Unknown option {unknown}.")),
         }
     }
-    Ok(Command::Collect(CollectOptions { selection, output_path }))
+    Ok(Command::Collect(CollectOptions { request: ReportRequest { selection, read_versions }, output_path }))
 }
 
 fn value_after<'argument>(option: &str, value: Option<&'argument String>) -> Result<&'argument str, String> {
@@ -68,7 +73,7 @@ mod tests {
         assert_eq!(
             parse(&[]),
             Ok(Command::Collect(CollectOptions {
-                selection: DeviceSelection::default(),
+                request: ReportRequest::default(),
                 output_path: PathBuf::from(DEFAULT_OUTPUT_FILE),
             }))
         );
@@ -77,16 +82,17 @@ mod tests {
     #[test]
     fn reads_every_option() {
         let Ok(Command::Collect(options)) =
-            parse(&["--all", "--vendor-id", "0x1532", "--product-id", "0258", "--output", "razer.json"])
+            parse(&["--all", "--read-versions", "--vendor-id", "0x1532", "--product-id", "0258", "--output", "r.json"])
         else {
             panic!("expected collect options");
         };
 
         assert_eq!(
-            options.selection,
+            options.request.selection,
             DeviceSelection { every_device: true, vendor_id: Some(0x1532), product_id: Some(0x0258) }
         );
-        assert_eq!(options.output_path, PathBuf::from("razer.json"));
+        assert!(options.request.read_versions);
+        assert_eq!(options.output_path, PathBuf::from("r.json"));
     }
 
     #[test]

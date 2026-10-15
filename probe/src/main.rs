@@ -30,7 +30,7 @@ fn run(arguments: &[String]) -> ExitCode {
 
 fn collect(options: &CollectOptions) -> ExitCode {
     let saved_to = std::path::absolute(&options.output_path).unwrap_or_else(|_| options.output_path.clone());
-    let written = collect_device_report(options.selection)
+    let written = collect_device_report(options.request)
         .and_then(|report| write_device_report(&report, &saved_to).map(|()| report));
     match written {
         Ok(report) => {

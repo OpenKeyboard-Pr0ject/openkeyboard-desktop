@@ -19,18 +19,16 @@ pub struct HidCollectionRecord {
     pub report_descriptor: Result<Vec<u8>, String>,
 }
 
-pub fn enumerate_hid_collections() -> Result<Vec<HidCollectionRecord>, String> {
-    let api = HidApi::new().map_err(|error| format!("Could not start hidapi: {error}"))?;
+pub fn enumerate_hid_collections(api: &HidApi) -> Vec<HidCollectionRecord> {
     let mut descriptors_by_path: HashMap<String, Result<Vec<u8>, String>> = HashMap::new();
-    Ok(api
-        .device_list()
+    api.device_list()
         .map(|info| {
             let path = info.path().to_string_lossy().into_owned();
             let report_descriptor =
-                descriptors_by_path.entry(path.clone()).or_insert_with(|| read_report_descriptor(&api, info)).clone();
+                descriptors_by_path.entry(path.clone()).or_insert_with(|| read_report_descriptor(api, info)).clone();
             record_of(info, path, report_descriptor)
         })
-        .collect())
+        .collect()
 }
 
 fn read_report_descriptor(api: &HidApi, info: &DeviceInfo) -> Result<Vec<u8>, String> {

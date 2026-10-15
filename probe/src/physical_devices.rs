@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::hid_inventory::HidCollectionRecord;
+use crate::read_only_queries::QueryRecord;
 use crate::windows_devices::WindowsDevice;
 
 const GENERIC_DESKTOP_USAGE_PAGE: u16 = 0x01;
@@ -11,6 +12,7 @@ pub struct DiscoveredInterface {
     pub collection: HidCollectionRecord,
     pub windows_devices: Vec<WindowsDevice>,
     pub container_key: Option<String>,
+    pub queries: Vec<QueryRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +77,7 @@ pub mod test_support {
             collection,
             windows_devices: Vec::new(),
             container_key: container_key.map(str::to_string),
+            queries: Vec::new(),
         }
     }
 }

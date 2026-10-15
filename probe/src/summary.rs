@@ -2,13 +2,19 @@ use std::fmt::Write;
 use std::path::Path;
 
 use crate::device_report::{DeviceEntry, DeviceReport, InterfaceEntry};
+use crate::read_only_queries::QueryRecord;
 
 const HEX_DIGITS_PER_BYTE: usize = 2;
 
 pub fn describe_report(report: &DeviceReport, saved_to: &Path) -> String {
     let mut text = String::from("OpenKeyboard device report\n\n");
     let _ = writeln!(text, "Looked for {}.", report.selection);
-    let _ = writeln!(text, "Found {}. No commands were sent to any device.", device_count(report.devices.len()));
+    let traffic = if report.read_only_queries_sent {
+        "Only read commands from a fixed list were sent."
+    } else {
+        "No commands were sent to any device."
+    };
+    let _ = writeln!(text, "Found {}. {traffic}", device_count(report.devices.len()));
     for device in &report.devices {
         text.push('\n');
         text.push_str(&describe_device(device));
@@ -49,8 +55,19 @@ fn describe_device(device: &DeviceEntry) -> String {
     let _ = writeln!(text, "  ids {vendor_id}:{product_id}, release {}, {}", device.release_number, device.bus);
     for interface in &device.interfaces {
         let _ = writeln!(text, "  {}", describe_interface(interface));
+        for query in &interface.queries {
+            let _ = writeln!(text, "      {}", describe_query(query));
+        }
     }
     text
+}
+
+fn describe_query(query: &QueryRecord) -> String {
+    match (&query.result, &query.error) {
+        (Some(result), _) => format!("{}: {result}", query.name),
+        (None, Some(error)) => format!("{}: {error}", query.name),
+        (None, None) => format!("{}: no result", query.name),
+    }
 }
 
 fn describe_interface(interface: &InterfaceEntry) -> String {
@@ -90,6 +107,7 @@ mod tests {
     use super::*;
     use crate::device_report::Generator;
     use crate::environment::Environment;
+    use crate::read_only_queries::ProtocolFamily;
     use crate::vendor_software::InstalledSoftware;
     use crate::windows_devices::WindowsDevice;
 
@@ -99,6 +117,7 @@ mod tests {
             generator: Generator { name: "openkeyboard-probe".to_string(), version: "0.1.0".to_string() },
             created_at: "2026-10-16T00:00:00Z".to_string(),
             selection: "devices with a keyboard collection".to_string(),
+            read_only_queries_sent: false,
             environment: Environment {
                 operating_system: "windows".to_string(),
                 architecture: "x86_64".to_string(),
@@ -117,6 +136,8 @@ mod tests {
                     usage: "0x0001".to_string(),
                     report_descriptor: Some("050c0901a101755a95b103c0".to_string()),
                     report_descriptor_error: None,
+                    declared_reports: Vec::new(),
+                    queries: Vec::new(),
                     windows_devices: vec![
                         WindowsDevice {
                             enumerator: "HID".to_string(),
@@ -154,6 +175,30 @@ mod tests {
         let text = describe_report(&razer_report(), Path::new("report.json"));
 
         assert!(text.contains("Razer Synapse 4.0.1 (Razer Inc.)"));
+    }
+
+    #[test]
+    fn lists_query_results_under_their_interface() {
+        let mut report = razer_report();
+        report.read_only_queries_sent = true;
+        report.devices[0].interfaces[0].queries = vec![
+            QueryRecord::new(ProtocolFamily::Razer, "Razer firmware version, transaction id 0x1f", &[0x1f])
+                .failed("The device did not answer this transaction id.".to_string()),
+            QueryRecord::new(ProtocolFamily::Razer, "Razer firmware version, transaction id 0x3f", &[0x3f])
+                .answered(&[0x02, 0x3f], Ok("2.3".to_string())),
+        ];
+
+        let text = describe_report(&report, Path::new("report.json"));
+
+        assert!(text.contains("Found 1 device. Only read commands from a fixed list were sent."));
+        assert!(text.contains(
+            "      Razer firmware version, transaction id 0x1f: The device did not answer this transaction id.
+"
+        ));
+        assert!(text.contains(
+            "      Razer firmware version, transaction id 0x3f: 2.3
+"
+        ));
     }
 
     #[test]

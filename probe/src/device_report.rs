@@ -2,13 +2,17 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::SystemTime;
 
+use hidapi::HidApi;
 use serde::Serialize;
 
-use crate::device_selection::DeviceSelection;
+use crate::device_selection::{DeviceSelection, select_devices};
 use crate::environment::{Environment, current_environment};
 use crate::hex::{hex_bytes, hex_u16};
 use crate::hid_inventory::enumerate_hid_collections;
+use crate::hid_transport::open_hidapi_transport;
 use crate::physical_devices::{DiscoveredInterface, PhysicalDevice, group_into_physical_devices};
+use crate::read_only_queries::{HARDWARE_TIMING, QueryRecord, query_physical_device};
+use crate::report_layout::{DeclaredReport, declared_reports};
 use crate::timestamp::utc_timestamp;
 use crate::vendor_software::{InstalledSoftware, installed_peripheral_software};
 use crate::windows_devices::{WindowsDevice, WindowsDeviceLookup, look_up_windows_devices};
@@ -23,6 +27,7 @@ pub struct DeviceReport {
     pub generator: Generator,
     pub created_at: String,
     pub selection: String,
+    pub read_only_queries_sent: bool,
     pub environment: Environment,
     pub devices: Vec<DeviceEntry>,
     pub vendor_software: Vec<InstalledSoftware>,
@@ -60,6 +65,10 @@ pub struct InterfaceEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report_descriptor_error: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub declared_reports: Vec<DeclaredReport>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub queries: Vec<QueryRecord>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub windows_devices: Vec<WindowsDevice>,
 }
 
@@ -81,43 +90,51 @@ impl DeviceEntry {
 impl InterfaceEntry {
     fn from_discovered_interface(interface: &DiscoveredInterface) -> Self {
         let collection = &interface.collection;
+        let descriptor = collection.report_descriptor.as_ref();
+        let layout = descriptor.map_err(Clone::clone).and_then(|bytes| declared_reports(bytes));
         Self {
             interface_number: collection.interface_number,
             usage_page: hex_u16(collection.usage_page),
             usage: hex_u16(collection.usage),
-            report_descriptor: collection.report_descriptor.as_ref().ok().map(|descriptor| hex_bytes(descriptor)),
-            report_descriptor_error: collection.report_descriptor.as_ref().err().cloned(),
+            report_descriptor: descriptor.ok().map(|bytes| hex_bytes(bytes)),
+            report_descriptor_error: layout.as_ref().err().cloned(),
+            declared_reports: layout.unwrap_or_default(),
+            queries: interface.queries.clone(),
             windows_devices: interface.windows_devices.clone(),
         }
     }
 }
 
-pub struct ReportContext {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReportRequest {
     pub selection: DeviceSelection,
+    pub read_versions: bool,
+}
+
+pub struct ReportContext {
+    pub request: ReportRequest,
     pub environment: Environment,
     pub vendor_software: Vec<InstalledSoftware>,
     pub created_at: SystemTime,
 }
 
-pub fn build_device_report(devices: &[PhysicalDevice], context: ReportContext) -> DeviceReport {
+pub fn build_device_report(selected_devices: &[PhysicalDevice], context: ReportContext) -> DeviceReport {
     DeviceReport {
         schema_version: SCHEMA_VERSION,
         generator: Generator { name: GENERATOR_NAME.to_string(), version: env!("CARGO_PKG_VERSION").to_string() },
         created_at: utc_timestamp(context.created_at),
-        selection: context.selection.describe(),
+        selection: context.request.selection.describe(),
+        read_only_queries_sent: context.request.read_versions,
         environment: context.environment,
-        devices: devices
-            .iter()
-            .filter(|device| context.selection.selects(device))
-            .map(DeviceEntry::from_physical_device)
-            .collect(),
+        devices: selected_devices.iter().map(DeviceEntry::from_physical_device).collect(),
         vendor_software: context.vendor_software,
     }
 }
 
-pub fn collect_device_report(selection: DeviceSelection) -> Result<DeviceReport, String> {
+pub fn collect_device_report(request: ReportRequest) -> Result<DeviceReport, String> {
+    let api = HidApi::new().map_err(|error| format!("Could not start hidapi: {error}"))?;
     let mut lookups_by_path: HashMap<String, WindowsDeviceLookup> = HashMap::new();
-    let interfaces = enumerate_hid_collections()?
+    let interfaces = enumerate_hid_collections(&api)
         .into_iter()
         .map(|collection| {
             let lookup = lookups_by_path
@@ -126,17 +143,26 @@ pub fn collect_device_report(selection: DeviceSelection) -> Result<DeviceReport,
             DiscoveredInterface {
                 windows_devices: lookup.chain.clone(),
                 container_key: lookup.container_key.clone(),
+                queries: Vec::new(),
                 collection,
             }
         })
         .collect();
+    let mut selected_devices = select_devices(group_into_physical_devices(interfaces), request.selection);
+    if request.read_versions {
+        let open_transport =
+            |collection: &_, numbered_input_reports| open_hidapi_transport(&api, collection, numbered_input_reports);
+        for device in &mut selected_devices {
+            query_physical_device(device, &open_transport, HARDWARE_TIMING);
+        }
+    }
     let context = ReportContext {
-        selection,
+        request,
         environment: current_environment(),
         vendor_software: installed_peripheral_software(),
         created_at: SystemTime::now(),
     };
-    Ok(build_device_report(&group_into_physical_devices(interfaces), context))
+    Ok(build_device_report(&selected_devices, context))
 }
 
 pub fn write_device_report(report: &DeviceReport, destination: &Path) -> Result<(), String> {
@@ -151,10 +177,12 @@ mod tests {
 
     use super::*;
     use crate::physical_devices::test_support::{collection, interface};
+    use crate::read_only_queries::ProtocolFamily;
+    use crate::report_layout::ReportKind;
 
-    fn context(selection: DeviceSelection) -> ReportContext {
+    fn context(read_versions: bool) -> ReportContext {
         ReportContext {
-            selection,
+            request: ReportRequest { selection: DeviceSelection::default(), read_versions },
             environment: Environment {
                 operating_system: "windows".to_string(),
                 architecture: "x86_64".to_string(),
@@ -165,29 +193,33 @@ mod tests {
         }
     }
 
-    fn wooting_with_mouse() -> Vec<PhysicalDevice> {
+    fn wooting() -> Vec<PhysicalDevice> {
         group_into_physical_devices(vec![
             interface(collection(0x31e3, 0x1402, 0x01, 0x06), Some("keyboard")),
             interface(collection(0x31e3, 0x1402, 0xff55, 0x01), Some("keyboard")),
-            interface(collection(0x046d, 0xc52b, 0x01, 0x02), Some("mouse")),
         ])
     }
 
     #[test]
-    fn keeps_only_selected_devices() {
-        let report = build_device_report(&wooting_with_mouse(), context(DeviceSelection::default()));
-
-        assert_eq!(report.devices.len(), 1);
-        assert_eq!(report.devices[0].vendor_id, "0x31e3");
-        assert_eq!(report.devices[0].interfaces.len(), 2);
-    }
-
-    #[test]
     fn writes_the_report_descriptor_as_hex() {
-        let report = build_device_report(&wooting_with_mouse(), context(DeviceSelection::default()));
+        let report = build_device_report(&wooting(), context(false));
 
         assert_eq!(report.devices[0].interfaces[1].report_descriptor.as_deref(), Some("0655ff0901a101c0"));
         assert_eq!(report.devices[0].interfaces[1].usage_page, "0xff55");
+    }
+
+    #[test]
+    fn lists_the_declared_reports() {
+        let mut config = collection(0x31e3, 0x1402, 0xff55, 0x01);
+        config.report_descriptor = Ok(vec![0x85, 0x01, 0x75, 0x08, 0x95, 0x07, 0xb1, 0x02]);
+        let devices = group_into_physical_devices(vec![interface(config, None)]);
+
+        let report = build_device_report(&devices, context(false));
+
+        assert_eq!(
+            report.devices[0].interfaces[0].declared_reports,
+            vec![DeclaredReport { kind: ReportKind::Feature, report_id: 1, byte_length: 7 }]
+        );
     }
 
     #[test]
@@ -196,19 +228,33 @@ mod tests {
         unreadable.report_descriptor = Err("Could not open the collection: access denied".to_string());
         let devices = group_into_physical_devices(vec![interface(unreadable, None)]);
 
-        let report = build_device_report(&devices, context(DeviceSelection::default()));
+        let report = build_device_report(&devices, context(false));
 
         assert_eq!(report.devices[0].interfaces[0].report_descriptor, None);
         assert!(report.devices[0].interfaces[0].report_descriptor_error.as_deref().unwrap().contains("access denied"));
     }
 
     #[test]
+    fn carries_the_query_results() {
+        let mut devices = wooting();
+        devices[0].interfaces[1].queries =
+            vec![QueryRecord::new(ProtocolFamily::Wooting, "Wooting firmware version", &[0xd1, 0xda, 0x01])];
+
+        let report = build_device_report(&devices, context(true));
+        let json = serde_json::to_string(&report).unwrap();
+
+        assert!(report.read_only_queries_sent);
+        assert!(json.contains("\"queries\":[{\"family\":\"wooting\",\"name\":\"Wooting firmware version\""));
+    }
+
+    #[test]
     fn never_writes_device_paths() {
-        let report = build_device_report(&wooting_with_mouse(), context(DeviceSelection::default()));
+        let report = build_device_report(&wooting(), context(false));
         let json = serde_json::to_string(&report).unwrap();
 
         assert!(!json.contains("HID#VID"));
         assert!(json.contains("\"schemaVersion\":1"));
+        assert!(json.contains("\"readOnlyQueriesSent\":false"));
         assert!(json.contains("\"createdAt\":\"1970-01-01T00:00:00Z\""));
     }
 }
