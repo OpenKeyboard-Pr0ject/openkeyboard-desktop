@@ -1,21 +1,18 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use hidapi::HidApi;
 use serde::Serialize;
 
-use crate::device_selection::{DeviceSelection, select_devices};
-use crate::environment::{Environment, current_environment};
+use crate::device_selection::DeviceSelection;
+use crate::environment::Environment;
 use crate::hex::{hex_bytes, hex_u16};
-use crate::hid_inventory::enumerate_hid_collections;
-use crate::hid_transport::open_hidapi_transport;
-use crate::physical_devices::{DiscoveredInterface, PhysicalDevice, group_into_physical_devices};
-use crate::read_only_queries::{HARDWARE_TIMING, QueryRecord, query_physical_device};
+use crate::hid_traffic::TrafficCapture;
+use crate::physical_devices::{DiscoveredInterface, PhysicalDevice};
+use crate::read_only_queries::QueryRecord;
 use crate::report_layout::{DeclaredReport, declared_reports};
 use crate::timestamp::utc_timestamp;
-use crate::vendor_software::{InstalledSoftware, installed_peripheral_software};
-use crate::windows_devices::{WindowsDevice, WindowsDeviceLookup, look_up_windows_devices};
+use crate::vendor_software::InstalledSoftware;
+use crate::windows_devices::WindowsDevice;
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const GENERATOR_NAME: &str = "openkeyboard-probe";
@@ -31,6 +28,8 @@ pub struct DeviceReport {
     pub environment: Environment,
     pub devices: Vec<DeviceEntry>,
     pub vendor_software: Vec<InstalledSoftware>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub traffic_captures: Vec<TrafficCapture>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -105,16 +104,26 @@ impl InterfaceEntry {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum CaptureSource {
+    #[default]
+    None,
+    LiveUsbPcap,
+    File(PathBuf),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReportRequest {
     pub selection: DeviceSelection,
     pub read_versions: bool,
+    pub capture: CaptureSource,
 }
 
 pub struct ReportContext {
     pub request: ReportRequest,
     pub environment: Environment,
     pub vendor_software: Vec<InstalledSoftware>,
+    pub traffic_captures: Vec<TrafficCapture>,
     pub created_at: SystemTime,
 }
 
@@ -128,41 +137,8 @@ pub fn build_device_report(selected_devices: &[PhysicalDevice], context: ReportC
         environment: context.environment,
         devices: selected_devices.iter().map(DeviceEntry::from_physical_device).collect(),
         vendor_software: context.vendor_software,
+        traffic_captures: context.traffic_captures,
     }
-}
-
-pub fn collect_device_report(request: ReportRequest) -> Result<DeviceReport, String> {
-    let api = HidApi::new().map_err(|error| format!("Could not start hidapi: {error}"))?;
-    let mut lookups_by_path: HashMap<String, WindowsDeviceLookup> = HashMap::new();
-    let interfaces = enumerate_hid_collections(&api)
-        .into_iter()
-        .map(|collection| {
-            let lookup = lookups_by_path
-                .entry(collection.path.clone())
-                .or_insert_with(|| look_up_windows_devices(&collection.path));
-            DiscoveredInterface {
-                windows_devices: lookup.chain.clone(),
-                container_key: lookup.container_key.clone(),
-                queries: Vec::new(),
-                collection,
-            }
-        })
-        .collect();
-    let mut selected_devices = select_devices(group_into_physical_devices(interfaces), request.selection);
-    if request.read_versions {
-        let open_transport =
-            |collection: &_, numbered_input_reports| open_hidapi_transport(&api, collection, numbered_input_reports);
-        for device in &mut selected_devices {
-            query_physical_device(device, &open_transport, HARDWARE_TIMING);
-        }
-    }
-    let context = ReportContext {
-        request,
-        environment: current_environment(),
-        vendor_software: installed_peripheral_software(),
-        created_at: SystemTime::now(),
-    };
-    Ok(build_device_report(&selected_devices, context))
 }
 
 pub fn write_device_report(report: &DeviceReport, destination: &Path) -> Result<(), String> {
@@ -176,19 +152,21 @@ mod tests {
     use std::time::UNIX_EPOCH;
 
     use super::*;
+    use crate::physical_devices::group_into_physical_devices;
     use crate::physical_devices::test_support::{collection, interface};
     use crate::read_only_queries::ProtocolFamily;
     use crate::report_layout::ReportKind;
 
     fn context(read_versions: bool) -> ReportContext {
         ReportContext {
-            request: ReportRequest { selection: DeviceSelection::default(), read_versions },
+            request: ReportRequest { read_versions, ..ReportRequest::default() },
             environment: Environment {
                 operating_system: "windows".to_string(),
                 architecture: "x86_64".to_string(),
                 windows: None,
             },
             vendor_software: Vec::new(),
+            traffic_captures: Vec::new(),
             created_at: UNIX_EPOCH,
         }
     }

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::hex::hex_bytes;
+use crate::hex::trimmed_hex;
 use crate::hid_inventory::HidCollectionRecord;
 use crate::hid_transport::HidTransport;
 use crate::physical_devices::PhysicalDevice;
@@ -90,11 +90,6 @@ pub const HARDWARE_TIMING: QueryTiming = QueryTiming {
     reply_timeout: Duration::from_secs(1),
     razer_polling: RazerPolling { interval: Duration::from_millis(8), maximum_polls: 60 },
 };
-
-pub fn trimmed_hex(bytes: &[u8]) -> String {
-    let used_length = bytes.iter().rposition(|byte| *byte != 0).map_or(0, |last| last + 1);
-    hex_bytes(&bytes[..used_length])
-}
 
 pub fn protocol_family_of(collection: &HidCollectionRecord, reports: &[DeclaredReport]) -> Option<ProtocolFamily> {
     let declares = |kind: ReportKind, report_id: u8, minimum_bytes: usize| {
@@ -216,12 +211,6 @@ mod tests {
         assert_eq!(family_of(&not_wooting), None);
         assert_eq!(family_of(&not_razer), None);
         assert_eq!(family_of(&razer_media_keys), None);
-    }
-
-    #[test]
-    fn trims_trailing_zero_bytes() {
-        assert_eq!(trimmed_hex(&[0xd1, 0xda, 0x01, 0x00, 0x00]), "d1da01");
-        assert_eq!(trimmed_hex(&[0x00, 0x00]), "");
     }
 
     #[test]

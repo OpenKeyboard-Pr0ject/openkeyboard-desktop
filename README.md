@@ -39,7 +39,7 @@ Tauri window
 
 ## Device reports
 
-[`probe/`](probe) holds `openkeyboard-probe`, a separate command-line tool for people whose keyboard is not supported yet. It writes a JSON report with every HID collection, its report descriptor, the Windows driver chain and the installed vendor software. By default it sends no commands to any device; `--read-versions` adds read-only version queries for VIA, Vial, Wooting and Razer devices. See [probe/README.md](probe/README.md).
+[`probe/`](probe) holds `openkeyboard-probe`, a separate command-line tool for people whose keyboard is not supported yet. It writes a JSON report with every HID collection, its report descriptor, the Windows driver chain and the installed vendor software. By default it sends no commands to any device; `--read-versions` adds read-only version queries for VIA, Vial, Wooting and Razer devices, and `--capture` or `--import-capture` adds the HID traffic of a vendor tool recorded with USBPcap. See [probe/README.md](probe/README.md).
 
 ## Development
 

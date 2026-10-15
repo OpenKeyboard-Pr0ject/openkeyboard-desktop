@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::device_report::ReportRequest;
+use crate::device_report::{CaptureSource, ReportRequest};
 use crate::device_selection::DeviceSelection;
 
 pub const DEFAULT_OUTPUT_FILE: &str = "openkeyboard-device-report.json";
@@ -14,6 +14,10 @@ By default it only lists devices and reads their descriptors. It sends no comman
 Options:
   --read-versions         Also ask VIA, Vial, Wooting and Razer devices for their protocol and firmware
                           versions. Only read commands from a fixed list are sent, and nothing is changed.
+  --capture               Record the USB traffic between the vendor tool and the keyboard named with
+                          --vendor-id, using USBPcap. Needs a terminal opened with Run as administrator.
+  --import-capture <file> Read a .pcap or .pcapng file recorded with USBPcap instead of recording one.
+                          Also needs --vendor-id.
   --all                   Include every HID device, not only devices with a keyboard collection
   --vendor-id <hex>       Include only devices with this vendor id, for example 1532
   --product-id <hex>      Include only devices with this product id, for example 0258
@@ -35,6 +39,7 @@ pub struct CollectOptions {
 pub fn parse_arguments(arguments: &[String]) -> Result<Command, String> {
     let mut selection = DeviceSelection::default();
     let mut read_versions = false;
+    let mut capture = CaptureSource::None;
     let mut output_path = PathBuf::from(DEFAULT_OUTPUT_FILE);
     let mut remaining = arguments.iter();
     while let Some(argument) = remaining.next() {
@@ -42,13 +47,28 @@ pub fn parse_arguments(arguments: &[String]) -> Result<Command, String> {
             "--help" | "-h" => return Ok(Command::ShowHelp),
             "--all" => selection.every_device = true,
             "--read-versions" => read_versions = true,
+            "--capture" => capture = chosen_capture(capture, CaptureSource::LiveUsbPcap)?,
+            "--import-capture" => {
+                let file = PathBuf::from(value_after(argument, remaining.next())?);
+                capture = chosen_capture(capture, CaptureSource::File(file))?;
+            }
             "--vendor-id" => selection.vendor_id = Some(parse_hex_id(value_after(argument, remaining.next())?)?),
             "--product-id" => selection.product_id = Some(parse_hex_id(value_after(argument, remaining.next())?)?),
             "--output" => output_path = PathBuf::from(value_after(argument, remaining.next())?),
             unknown => return Err(format!("Unknown option {unknown}.")),
         }
     }
-    Ok(Command::Collect(CollectOptions { request: ReportRequest { selection, read_versions }, output_path }))
+    if capture != CaptureSource::None && selection.vendor_id.is_none() {
+        return Err("Recording traffic needs --vendor-id, so that only that keyboard's traffic is kept.".to_string());
+    }
+    Ok(Command::Collect(CollectOptions { request: ReportRequest { selection, read_versions, capture }, output_path }))
+}
+
+fn chosen_capture(current: CaptureSource, requested: CaptureSource) -> Result<CaptureSource, String> {
+    if current != CaptureSource::None {
+        return Err("Use either --capture or --import-capture, once.".to_string());
+    }
+    Ok(requested)
 }
 
 fn value_after<'argument>(option: &str, value: Option<&'argument String>) -> Result<&'argument str, String> {
@@ -93,6 +113,36 @@ mod tests {
         );
         assert!(options.request.read_versions);
         assert_eq!(options.output_path, PathBuf::from("r.json"));
+    }
+
+    #[test]
+    fn reads_capture_options() {
+        let Ok(Command::Collect(live)) = parse(&["--capture", "--vendor-id", "31e3"]) else {
+            panic!("expected collect options");
+        };
+        let Ok(Command::Collect(imported)) = parse(&["--vendor-id", "1532", "--import-capture", "synapse.pcapng"])
+        else {
+            panic!("expected collect options");
+        };
+
+        assert_eq!(live.request.capture, CaptureSource::LiveUsbPcap);
+        assert_eq!(imported.request.capture, CaptureSource::File(PathBuf::from("synapse.pcapng")));
+    }
+
+    #[test]
+    fn requires_a_vendor_for_captures() {
+        assert_eq!(
+            parse(&["--capture"]),
+            Err("Recording traffic needs --vendor-id, so that only that keyboard's traffic is kept.".to_string())
+        );
+    }
+
+    #[test]
+    fn accepts_one_capture_source() {
+        assert_eq!(
+            parse(&["--vendor-id", "31e3", "--capture", "--import-capture", "a.pcap"]),
+            Err("Use either --capture or --import-capture, once.".to_string())
+        );
     }
 
     #[test]

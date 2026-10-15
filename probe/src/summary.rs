@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::Path;
 
 use crate::device_report::{DeviceEntry, DeviceReport, InterfaceEntry};
+use crate::hid_traffic::{TrafficCapture, TrafficKind};
 use crate::read_only_queries::QueryRecord;
 
 const HEX_DIGITS_PER_BYTE: usize = 2;
@@ -14,10 +16,14 @@ pub fn describe_report(report: &DeviceReport, saved_to: &Path) -> String {
     } else {
         "No commands were sent to any device."
     };
-    let _ = writeln!(text, "Found {}. {traffic}", device_count(report.devices.len()));
+    let _ = writeln!(text, "Found {}. {traffic}", counted(report.devices.len(), "device"));
     for device in &report.devices {
         text.push('\n');
         text.push_str(&describe_device(device));
+    }
+    for capture in &report.traffic_captures {
+        text.push('\n');
+        text.push_str(&describe_capture(capture));
     }
     if !report.vendor_software.is_empty() {
         text.push_str("\nVendor software\n");
@@ -42,8 +48,8 @@ pub fn describe_report(report: &DeviceReport, saved_to: &Path) -> String {
     text
 }
 
-fn device_count(count: usize) -> String {
-    if count == 1 { "1 device".to_string() } else { format!("{count} devices") }
+fn counted(count: usize, noun: &str) -> String {
+    if count == 1 { format!("1 {noun}") } else { format!("{count} {noun}s") }
 }
 
 fn describe_device(device: &DeviceEntry) -> String {
@@ -57,6 +63,40 @@ fn describe_device(device: &DeviceEntry) -> String {
         let _ = writeln!(text, "  {}", describe_interface(interface));
         for query in &interface.queries {
             let _ = writeln!(text, "      {}", describe_query(query));
+        }
+    }
+    text
+}
+
+fn describe_capture(capture: &TrafficCapture) -> String {
+    let mut text = format!("USB traffic of {}:{} ({})\n", capture.vendor_id, capture.product_id, capture.source);
+    let mut counts: BTreeMap<TrafficKind, usize> = BTreeMap::new();
+    for entry in &capture.entries {
+        *counts.entry(entry.kind).or_default() += 1;
+    }
+    let breakdown: Vec<String> = counts.iter().map(|(kind, count)| format!("{count} {}", kind.name())).collect();
+    let _ = writeln!(text, "  {}: {}", counted(capture.entries.len(), "report"), breakdown.join(", "));
+    if capture.left_out_input_reports > 0 {
+        let left_out = counted(capture.left_out_input_reports, "input report");
+        let _ = writeln!(text, "  Left out {left_out} from keyboard, mouse or media interfaces.");
+    }
+    if capture.entry_limit_reached {
+        let _ = writeln!(text, "  The capture was cut off at {}.", counted(capture.entries.len(), "report"));
+    }
+    if !capture.marks.is_empty() {
+        text.push_str("  Changes\n");
+        for (index, mark) in capture.marks.iter().enumerate() {
+            let count = capture.entries.iter().filter(|entry| entry.mark == Some(index)).count();
+            let _ = writeln!(text, "    {}. {}: {}", index + 1, mark.label, counted(count, "report"));
+        }
+    }
+    if !capture.repeated_requests.is_empty() {
+        text.push_str("  Repeated requests, probably polling\n");
+        for request in &capture.repeated_requests {
+            let interface = request.interface.map(|number| format!(" interface {number}")).unwrap_or_default();
+            let report_id = request.report_id.map(|id| format!(" report {id}")).unwrap_or_default();
+            let kind = request.kind.name();
+            let _ = writeln!(text, "    {kind}{interface}{report_id} {} x{}", request.data, request.count);
         }
     }
     text
@@ -107,6 +147,7 @@ mod tests {
     use super::*;
     use crate::device_report::Generator;
     use crate::environment::Environment;
+    use crate::hid_traffic::{CaptureMark, RepeatedRequest, TrafficEntry};
     use crate::read_only_queries::ProtocolFamily;
     use crate::vendor_software::InstalledSoftware;
     use crate::windows_devices::WindowsDevice;
@@ -153,6 +194,7 @@ mod tests {
                     ],
                 }],
             }],
+            traffic_captures: Vec::new(),
             vendor_software: vec![InstalledSoftware {
                 name: "Razer Synapse".to_string(),
                 version: Some("4.0.1".to_string()),
@@ -199,6 +241,49 @@ mod tests {
             "      Razer firmware version, transaction id 0x3f: 2.3
 "
         ));
+    }
+
+    #[test]
+    fn describes_a_traffic_capture() {
+        let entry = |mark: Option<usize>, kind: TrafficKind| TrafficEntry {
+            at_micros: 0,
+            mark,
+            kind,
+            interface: Some(3),
+            report_id: Some(0),
+            endpoint: None,
+            data: "001f".to_string(),
+            status: None,
+        };
+        let mut report = razer_report();
+        report.traffic_captures = vec![TrafficCapture {
+            source: "usbpcap".to_string(),
+            vendor_id: "0x1532".to_string(),
+            product_id: "0x0258".to_string(),
+            release_number: "0x0200".to_string(),
+            marks: vec![CaptureMark { label: "brightness 60 to 40".to_string(), at_micros: 0 }],
+            entries: vec![
+                entry(None, TrafficKind::SetFeature),
+                entry(Some(0), TrafficKind::SetFeature),
+                entry(Some(0), TrafficKind::GetFeature),
+            ],
+            left_out_input_reports: 4,
+            entry_limit_reached: false,
+            repeated_requests: vec![RepeatedRequest {
+                kind: TrafficKind::SetFeature,
+                interface: Some(3),
+                report_id: Some(0),
+                data: "001f".to_string(),
+                count: 9,
+            }],
+        }];
+
+        let text = describe_report(&report, Path::new("report.json"));
+
+        assert!(text.contains("USB traffic of 0x1532:0x0258 (usbpcap)\n  3 reports: 2 set-feature, 1 get-feature\n"));
+        assert!(text.contains("  Left out 4 input reports from keyboard, mouse or media interfaces.\n"));
+        assert!(text.contains("    1. brightness 60 to 40: 2 reports\n"));
+        assert!(text.contains("    set-feature interface 3 report 0 001f x9\n"));
     }
 
     #[test]
